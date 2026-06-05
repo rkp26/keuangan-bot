@@ -2,9 +2,9 @@ import os
 import logging
 from datetime import datetime
 import pytz
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
 from sheets import (
@@ -112,6 +112,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• gajian 5jt\n"
         f"• beli bensin 50rb\n"
         f"• bayar listrik 200000\n\n"
+        f"*📸 Foto Struk:*\n"
+        f"Kirim foto struk/nota, gua baca otomatis!\n\n"
         f"*Shorthand:* 50k = 50.000 | 2jt = 2.000.000",
         parse_mode="Markdown",
         reply_markup=get_keyboard()
@@ -197,10 +199,7 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Format: /budget 3000000")
         return
     set_budget(nominal)
-    await update.message.reply_text(
-        f"🎯 Budget di-set: *{format_rp(nominal)}*",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"🎯 Budget di-set: *{format_rp(nominal)}*", parse_mode="Markdown")
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txs = get_last_transaksi(10)
@@ -240,7 +239,60 @@ async def proses_simpan(update, tipe, nominal, keterangan, kategori):
                 txt += f"\n\n🚨 *OVER BUDGET!*"
             elif persen >= 80:
                 txt += f"\n\n⚠️ Budget terpakai {persen:.0f}%. Sisa {format_rp(sisa)}"
-    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=get_keyboard())
+    msg = update.message if hasattr(update, 'message') and update.message else update
+    await msg.reply_text(txt, parse_mode="Markdown", reply_markup=get_keyboard())
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📸 Gua lagi baca struk-nya, tunggu sebentar...")
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = await file.download_as_bytearray()
+        from ocr import baca_struk
+        result = baca_struk(bytes(image_bytes))
+        if "error" in result:
+            await update.message.reply_text("❌ Gua gak bisa baca ini sebagai struk.\nCoba foto yang lebih jelas ya!")
+            return
+        tipe = result.get("tipe", "keluar")
+        nominal = int(result.get("nominal", 0))
+        keterangan = result.get("keterangan", "Transaksi")
+        kategori = result.get("kategori", "lainnya")
+        if nominal <= 0:
+            await update.message.reply_text("❌ Gua gak bisa detect nominal-nya. Coba input manual ya.")
+            return
+        emoji = "💰" if tipe == "masuk" else "💸"
+        label = "Pemasukan" if tipe == "masuk" else "Pengeluaran"
+        context.user_data["pending_tx"] = {"tipe": tipe, "nominal": nominal, "keterangan": keterangan, "kategori": kategori}
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Ya, simpan", callback_data="confirm_tx"),
+            InlineKeyboardButton("❌ Batal", callback_data="cancel_tx")
+        ]])
+        await update.message.reply_text(
+            f"📸 *Gua baca struk ini:*\n\n"
+            f"{emoji} Tipe       : {label}\n"
+            f"📝 Keterangan: {keterangan}\n"
+            f"💵 Nominal   : {format_rp(nominal)}\n"
+            f"📂 Kategori  : {kategori.capitalize()}\n\n"
+            f"Bener gak bro?",
+            parse_mode="Markdown", reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await update.message.reply_text("❌ Gagal baca struk. Coba lagi atau input manual ya bro.")
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "confirm_tx":
+        tx = context.user_data.get("pending_tx")
+        if tx:
+            await proses_simpan(query, tx["tipe"], tx["nominal"], tx["keterangan"], tx["kategori"])
+            context.user_data.pop("pending_tx", None)
+        else:
+            await query.edit_message_text("❌ Data transaksi tidak ditemukan.")
+    elif query.data == "cancel_tx":
+        context.user_data.pop("pending_tx", None)
+        await query.edit_message_text("❌ Transaksi dibatalkan.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -275,94 +327,11 @@ def main():
     app.add_handler(CommandHandler("rekap", cmd_rekap))
     app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(CommandHandler("last", cmd_last))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__":
-    main()
-
-# ── PHOTO HANDLER ─────────────────────────────────────────────
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Gua lagi baca struk-nya, tunggu sebentar...")
-    
-    try:
-        # Ambil foto resolusi terbaik
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
-        
-        from ocr import baca_struk
-        result = baca_struk(bytes(image_bytes))
-        
-        if "error" in result:
-            await update.message.reply_text(
-                "❌ Gua gak bisa baca ini sebagai struk keuangan.\n"
-                "Coba foto yang lebih jelas ya bro!"
-            )
-            return
-        
-        tipe      = result.get("tipe", "keluar")
-        nominal   = int(result.get("nominal", 0))
-        keterangan = result.get("keterangan", "Transaksi")
-        kategori  = result.get("kategori", "lainnya")
-        
-        if nominal <= 0:
-            await update.message.reply_text("❌ Gua gak bisa detect nominal-nya. Coba input manual ya.")
-            return
-        
-        # Konfirmasi dulu sebelum simpan
-        emoji = "💰" if tipe == "masuk" else "💸"
-        label = "Pemasukan" if tipe == "masuk" else "Pengeluaran"
-        
-        # Simpan ke context buat konfirmasi
-        context.user_data["pending_tx"] = {
-            "tipe": tipe, "nominal": nominal,
-            "keterangan": keterangan, "kategori": kategori
-        }
-        
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Ya, simpan", callback_data="confirm_tx"),
-                InlineKeyboardButton("❌ Batal", callback_data="cancel_tx")
-            ]
-        ])
-        
-        await update.message.reply_text(
-            f"📸 *Gua baca struk ini:*\n\n"
-            f"{emoji} Tipe       : {label}\n"
-            f"📝 Keterangan: {keterangan}\n"
-            f"💵 Nominal   : {format_rp(nominal)}\n"
-            f"📂 Kategori  : {kategori.capitalize()}\n\n"
-            f"Bener gak bro?",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-        
-    except Exception as e:
-        logger.error(f"Photo handler error: {e}")
-        await update.message.reply_text(
-            "❌ Gagal baca struk. Coba lagi atau input manual ya bro."
-        )
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "confirm_tx":
-        tx = context.user_data.get("pending_tx")
-        if tx:
-            await proses_simpan(query, tx["tipe"], tx["nominal"], tx["keterangan"], tx["kategori"])
-            context.user_data.pop("pending_tx", None)
-        else:
-            await query.edit_message_text("❌ Data transaksi tidak ditemukan.")
-    
-    elif query.data == "cancel_tx":
-        context.user_data.pop("pending_tx", None)
-        await query.edit_message_text("❌ Transaksi dibatalkan.")
 if __name__ == "__main__":
     main()
