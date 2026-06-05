@@ -177,9 +177,11 @@ def cek_budget():
                 except: pass
 
     return {"budget": budget, "keluar": total_keluar}
+
 # ── GET SUMMARY (alias) ───────────────────────────────────────
 def get_summary():
     return get_saldo()
+
 # ── UPDATE SUMMARY ────────────────────────────────────────────
 def update_summary():
     data = get_saldo()
@@ -193,3 +195,8 @@ def update_summary():
         ["SALDO",             data["saldo"]],
         ["Terakhir Update",   now],
     ])
+    try:
+        from dashboard import build_dashboard
+        build_dashboard()
+    except Exception as e:
+        print(f"Dashboard update error: {e}")
