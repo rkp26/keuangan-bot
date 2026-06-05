@@ -8,8 +8,8 @@ from telegram.ext import (
     filters, ContextTypes
 )
 from sheets import (
-    simpan_transaksi, get_saldo, get_summary,
-    get_rekap_bulan, get_last_transaksi, cek_budget
+    simpan_transaksi, get_saldo,
+    get_rekap_bulan, get_last_transaksi, cek_budget, set_budget
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WIB = pytz.timezone("Asia/Jakarta")
 
-# ── KEYWORD NATURAL LANGUAGE ──────────────────────────────────
 KATA_MASUK = [
     "gaji", "gajian", "bonus", "terima", "dapat", "dapet",
     "pemasukan", "income", "bayaran", "fee", "honor", "thr",
@@ -32,14 +31,13 @@ KATA_KELUAR = [
     "laundry", "obat", "pulsa", "paket data"
 ]
 
-# Kategori pengeluaran
 KATEGORI = {
     "makan": ["makan", "minum", "jajan", "nongkrong", "ngopi", "kopi", "resto", "warteg"],
     "transport": ["bensin", "parkir", "ojek", "grab", "gojek", "taxi", "busway", "kereta"],
     "tagihan": ["listrik", "wifi", "internet", "tagihan", "cicilan", "pulsa", "paket data"],
     "belanja": ["beli", "belanja", "tokopedia", "shopee", "lazada"],
     "hiburan": ["nonton", "bioskop", "game", "spotify", "netflix"],
-    "kesehatan": ["obat", "dokter", "klinik", "apotek", "rumah sakit"],
+    "kesehatan": ["obat", "dokter", "klinik", "apotek"],
     "laundry": ["laundry", "cuci"],
 }
 
@@ -52,7 +50,6 @@ def detect_kategori(text):
     return "lainnya"
 
 def parse_nominal(text):
-    """Parse nominal dari teks, support k/rb/ribu/jt/juta"""
     import re
     match = re.search(r'(\d[\d.,]*)\s*(k|rb|ribu|jt|juta|m|miliar)?', text, re.IGNORECASE)
     if not match:
@@ -68,12 +65,11 @@ def parse_nominal(text):
     return int(nominal) if nominal > 0 else None
 
 def parse_natural_language(text):
-    """Deteksi tipe transaksi dari natural language"""
+    import re
     lower = text.lower()
     nominal = parse_nominal(text)
     if not nominal:
         return None
-
     tipe = None
     for kata in KATA_MASUK:
         if kata in lower:
@@ -86,16 +82,13 @@ def parse_natural_language(text):
                 break
     if not tipe:
         return None
-
-    import re
     keterangan = re.sub(r'\d[\d.,]*\s*(k|rb|ribu|jt|juta|m|miliar)?', '', text, flags=re.IGNORECASE).strip()
     keterangan = keterangan or ("-" if tipe == "masuk" else "Pengeluaran")
     kategori = detect_kategori(text) if tipe == "keluar" else "pemasukan"
-
     return {"tipe": tipe, "nominal": nominal, "keterangan": keterangan, "kategori": kategori}
 
 def format_rp(nominal):
-    return f"Rp {nominal:,.0f}".replace(",", ".")
+    return f"Rp {int(nominal):,}".replace(",", ".")
 
 def get_keyboard():
     keyboard = [
@@ -105,7 +98,6 @@ def get_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ── COMMAND HANDLERS ──────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
     await update.message.reply_text(
@@ -115,51 +107,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/keluar 25000 Makan siang\n"
         f"/saldo — cek saldo\n"
         f"/rekap — rekap bulan ini\n"
-        f"/budget 3000000 — set budget bulan ini\n\n"
+        f"/budget 3000000 — set budget\n\n"
         f"*💬 Natural Language:*\n"
-        f"• _gajian 5jt_\n"
-        f"• _beli bensin 50rb_\n"
-        f"• _bayar listrik 200000_\n\n"
+        f"• gajian 5jt\n"
+        f"• beli bensin 50rb\n"
+        f"• bayar listrik 200000\n\n"
         f"*Shorthand:* 50k = 50.000 | 2jt = 2.000.000",
         parse_mode="Markdown",
         reply_markup=get_keyboard()
     )
 
 async def cmd_masuk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
+    if not context.args:
         await update.message.reply_text("❌ Format: /masuk 5000000 Gaji bulan ini")
         return
-    nominal = parse_nominal(args[0])
+    nominal = parse_nominal(context.args[0])
     if not nominal:
-        await update.message.reply_text("❌ Nominal tidak valid. Contoh: /masuk 5jt Gaji")
+        await update.message.reply_text("❌ Nominal tidak valid.")
         return
-    keterangan = " ".join(args[1:]) or "Pemasukan"
+    keterangan = " ".join(context.args[1:]) or "Pemasukan"
     await proses_simpan(update, "masuk", nominal, keterangan, "pemasukan")
 
 async def cmd_keluar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
+    if not context.args:
         await update.message.reply_text("❌ Format: /keluar 25000 Makan siang")
         return
-    nominal = parse_nominal(args[0])
+    nominal = parse_nominal(context.args[0])
     if not nominal:
-        await update.message.reply_text("❌ Nominal tidak valid. Contoh: /keluar 50rb Bensin")
+        await update.message.reply_text("❌ Nominal tidak valid.")
         return
-    keterangan = " ".join(args[1:]) or "Pengeluaran"
+    keterangan = " ".join(context.args[1:]) or "Pengeluaran"
     kategori = detect_kategori(keterangan)
     await proses_simpan(update, "keluar", nominal, keterangan, kategori)
 
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    saldo_data = get_saldo()
-    masuk = saldo_data["total_masuk"]
-    keluar = saldo_data["total_keluar"]
-    saldo = saldo_data["saldo"]
+    data = get_saldo()
+    saldo = data["saldo"]
     emoji = "✅" if saldo >= 0 else "⚠️"
     await update.message.reply_text(
         f"📊 *RINGKASAN KEUANGAN*\n\n"
-        f"💰 Total Pemasukan  : {format_rp(masuk)}\n"
-        f"💸 Total Pengeluaran: {format_rp(keluar)}\n"
+        f"💰 Total Pemasukan  : {format_rp(data['total_masuk'])}\n"
+        f"💸 Total Pengeluaran: {format_rp(data['total_keluar'])}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"{emoji} *Saldo: {format_rp(saldo)}*",
         parse_mode="Markdown"
@@ -167,40 +155,28 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_rekap_bulan()
-    masuk = data["masuk"]
-    keluar = data["keluar"]
-    net = masuk - keluar
-    nama_bln = data["nama_bulan"]
+    net = data["masuk"] - data["keluar"]
     emoji = "✅" if net >= 0 else "⚠️"
-
-    # Breakdown kategori
     breakdown = data.get("breakdown", {})
     kat_txt = ""
     if breakdown:
-        kat_txt = "\n\n*📂 Pengeluaran per Kategori:*\n"
+        kat_txt = "\n\n*📂 Per Kategori:*\n"
         for kat, total in sorted(breakdown.items(), key=lambda x: -x[1]):
             kat_txt += f"  • {kat.capitalize()}: {format_rp(total)}\n"
-
     await update.message.reply_text(
-        f"📅 *REKAP {nama_bln.upper()}*\n\n"
-        f"💰 Pemasukan  : {format_rp(masuk)}\n"
-        f"💸 Pengeluaran: {format_rp(keluar)}\n"
+        f"📅 *REKAP {data['nama_bulan'].upper()}*\n\n"
+        f"💰 Pemasukan  : {format_rp(data['masuk'])}\n"
+        f"💸 Pengeluaran: {format_rp(data['keluar'])}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{emoji} *Net: {format_rp(net)}*"
-        f"{kat_txt}",
+        f"{emoji} *Net: {format_rp(net)}*{kat_txt}",
         parse_mode="Markdown"
     )
 
 async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        # Cek budget saat ini
+    if not context.args:
         data = cek_budget()
         if not data:
-            await update.message.reply_text(
-                "🎯 Belum ada budget yang di-set.\n"
-                "Set dengan: /budget 3000000"
-            )
+            await update.message.reply_text("🎯 Belum ada budget.\nSet dengan: /budget 3000000")
             return
         sisa = data["budget"] - data["keluar"]
         persen = (data["keluar"] / data["budget"] * 100) if data["budget"] > 0 else 0
@@ -216,17 +192,13 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-
-    nominal = parse_nominal(args[0])
+    nominal = parse_nominal(context.args[0])
     if not nominal:
         await update.message.reply_text("❌ Format: /budget 3000000")
         return
-
-    from sheets import set_budget
     set_budget(nominal)
     await update.message.reply_text(
-        f"🎯 Budget bulan ini di-set: *{format_rp(nominal)}*\n"
-        f"Gua akan notif kalau udah 80% dan over budget!",
+        f"🎯 Budget di-set: *{format_rp(nominal)}*",
         parse_mode="Markdown"
     )
 
@@ -238,95 +210,72 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = "🕐 *10 TRANSAKSI TERAKHIR*\n\n"
     for tx in txs:
         emoji = "💰" if tx["tipe"] == "masuk" else "💸"
-        txt += f"{emoji} {tx['tanggal']} — {tx['keterangan']}\n"
-        txt += f"    {format_rp(tx['nominal'])}\n\n"
+        txt += f"{emoji} {tx['tanggal']} — {tx['keterangan']}\n    {format_rp(tx['nominal'])}\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
-# ── PROSES SIMPAN ─────────────────────────────────────────────
 async def proses_simpan(update, tipe, nominal, keterangan, kategori):
     name = update.effective_user.first_name
     now = datetime.now(WIB)
     tanggal = now.strftime("%d/%m/%Y")
     waktu = now.strftime("%H:%M")
-
     simpan_transaksi(tipe, nominal, keterangan, kategori, tanggal, waktu, name)
     saldo_data = get_saldo()
     saldo = saldo_data["saldo"]
-
     emoji = "💰" if tipe == "masuk" else "💸"
     label = "Pemasukan" if tipe == "masuk" else "Pengeluaran"
-
     txt = (
         f"{emoji} *{label} tercatat!*\n\n"
         f"📝 Keterangan : {keterangan}\n"
         f"💵 Nominal    : {format_rp(nominal)}\n"
         f"📂 Kategori   : {kategori.capitalize()}\n"
         f"📅 Waktu      : {tanggal} {waktu}\n\n"
-        f"💼 *Saldo sekarang: {format_rp(saldo)}*"
+        f"💼 *Saldo: {format_rp(saldo)}*"
     )
-
-    # Cek budget kalau pengeluaran
     if tipe == "keluar":
         budget_data = cek_budget()
         if budget_data and budget_data["budget"] > 0:
             sisa = budget_data["budget"] - budget_data["keluar"]
             persen = budget_data["keluar"] / budget_data["budget"] * 100
             if persen >= 100:
-                txt += f"\n\n🚨 *OVER BUDGET!* Sudah terpakai {format_rp(budget_data['keluar'])} dari {format_rp(budget_data['budget'])}"
+                txt += f"\n\n🚨 *OVER BUDGET!*"
             elif persen >= 80:
-                txt += f"\n\n⚠️ *Peringatan!* Budget sudah terpakai {persen:.0f}%. Sisa {format_rp(sisa)}"
-
+                txt += f"\n\n⚠️ Budget terpakai {persen:.0f}%. Sisa {format_rp(sisa)}"
     await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=get_keyboard())
 
-# ── MESSAGE HANDLER (natural language) ───────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-
-    # Tombol keyboard
     if text == "💰 Saldo":
-        await cmd_saldo(update, context)
-        return
+        await cmd_saldo(update, context); return
     if text == "📊 Rekap Bulan Ini":
-        await cmd_rekap(update, context)
-        return
+        await cmd_rekap(update, context); return
     if text == "📋 Transaksi Terakhir":
-        await cmd_last(update, context)
-        return
+        await cmd_last(update, context); return
     if text == "🎯 Cek Budget":
         context.args = []
-        await cmd_budget(update, context)
-        return
+        await cmd_budget(update, context); return
     if text == "❓ Bantuan":
-        await start(update, context)
-        return
-
-    # Natural language
+        await start(update, context); return
     result = parse_natural_language(text)
     if result:
         await proses_simpan(update, result["tipe"], result["nominal"], result["keterangan"], result["kategori"])
         return
-
     await update.message.reply_text(
         f"🤔 Gua gak ngerti _\"{text}\"_\n\nKetik /bantuan atau tap tombol di bawah.",
-        parse_mode="Markdown",
-        reply_markup=get_keyboard()
+        parse_mode="Markdown", reply_markup=get_keyboard()
     )
 
-# ── MAIN ──────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start",   start))
-    app.add_handler(CommandHandler("help",    start))
-    app.add_handler(CommandHandler("masuk",   cmd_masuk))
-    app.add_handler(CommandHandler("keluar",  cmd_keluar))
-    app.add_handler(CommandHandler("saldo",   cmd_saldo))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("masuk", cmd_masuk))
+    app.add_handler(CommandHandler("keluar", cmd_keluar))
+    app.add_handler(CommandHandler("saldo", cmd_saldo))
     app.add_handler(CommandHandler("summary", cmd_saldo))
-    app.add_handler(CommandHandler("rekap",   cmd_rekap))
-    app.add_handler(CommandHandler("budget",  cmd_budget))
-    app.add_handler(CommandHandler("last",    cmd_last))
+    app.add_handler(CommandHandler("rekap", cmd_rekap))
+    app.add_handler(CommandHandler("budget", cmd_budget))
+    app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logger.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 
