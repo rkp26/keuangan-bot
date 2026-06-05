@@ -364,3 +364,5 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel_tx":
         context.user_data.pop("pending_tx", None)
         await query.edit_message_text("❌ Transaksi dibatalkan.")
+if __name__ == "__main__":
+    main()
